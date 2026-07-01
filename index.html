@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BadmintonPro</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="BadmintonPro">
+  <meta name="theme-color" content="#16a34a">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: '#16a34a',
+            accent: '#f59e0b',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background: #0f172a; font-family: 'Segoe UI', system-ui, sans-serif; }
+    .star-active { color: #f59e0b; }
+    .star-inactive { color: #374151; }
+    .court-gradient { background: linear-gradient(135deg, #14532d 0%, #166534 50%, #14532d 100%); }
+    .glass { background: rgba(255,255,255,0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
+    .pulse-win { animation: pulseGreen 0.6s ease-in-out; }
+    @keyframes pulseGreen { 0%,100%{transform:scale(1)} 50%{transform:scale(1.04)} }
+    .badge { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:9999px; font-size:12px; font-weight:600; }
+    .scrollbar-thin::-webkit-scrollbar { width: 4px; }
+    .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+    .scrollbar-thin::-webkit-scrollbar-thumb { background: #374151; border-radius: 2px; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useCallback, useMemo } = React;
+
+// ─── Types (as JSDoc) ───────────────────────────────────────────────────────
+// Player: { id, name, rating, sessionPoints, wins, roundsPlayed, roundsOnBench, lastRoundBenched }
+// Match: { courtIndex, teamA:[id,id], teamB:[id,id], winner:null|'A'|'B' }
+// Round: { matches:[], bench:[] }
+
+// ─── Utilities ──────────────────────────────────────────────────────────────
+let _id = 0;
+const uid = () => `p${++_id}`;
+
+function pairKey(a, b) { return a < b ? `${a}|${b}` : `${b}|${a}`; }
+
+function bestSplit(four, players, usedPairs) {
+  // All 3 ways to split 4 players into 2 pairs
+  const combos = [
+    [[0,1],[2,3]], [[0,2],[1,3]], [[0,3],[1,2]]
+  ];
+  let best = null, bestDiff = Infinity, bestRepeats = Infinity;
+  for (const [[a,b],[c,d]] of combos) {
+    const idA1 = four[a], idA2 = four[b], idB1 = four[c], idB2 = four[d];
+    const rA = players[idA1].rating + players[idA2].rating;
+    const rB = players[idB1].rating + players[idB2].rating;
+    const diff = Math.abs(rA - rB);
+    // Count how many of these pairings were used before
+    const repeats = (usedPairs.has(pairKey(idA1, idA2)) ? 1 : 0)
+                  + (usedPairs.has(pairKey(idB1, idB2)) ? 1 : 0);
+    // Prefer fewest repeated pairs first, then most balanced rating
+    if (repeats < bestRepeats || (repeats === bestRepeats && diff < bestDiff)) {
+      bestRepeats = repeats; bestDiff = diff;
+      best = [[idA1, idA2], [idB1, idB2]];
+    }
+  }
+  return best;
+}
+
+// Composite skill score used for adaptive matchups (round 2+)
+// Blends session points, win%, and score differential
+function adaptiveScore(p) {
+  const winPct = p.roundsPlayed > 0 ? p.wins / p.roundsPlayed : 0;
+  const pointDiff = p.roundsPlayed > 0 ? ((p.pointsScored ?? 0) - (p.pointsAgainst ?? 0)) / p.roundsPlayed : 0;
+  // 50% points, 30% win%, 20% normalised score diff
+  return p.sessionPoints * 0.5 + winPct * 20 * 0.3 + pointDiff * 0.2;
+}
+
+function generateRound(playerMap, prevRound, courtCount, isFirst, allPastRounds = []) {
+  // Build set of all previous teammate pairings to avoid repeating
+  const usedPairs = new Set();
+  for (const round of allPastRounds) {
+    for (const match of round.matches) {
+      usedPairs.add(pairKey(match.teamA[0], match.teamA[1]));
+      usedPairs.add(pairKey(match.teamB[0], match.teamB[1]));
+    }
+  }
+  const allPlayers = Object.values(playerMap);
+  const total = allPlayers.length;
+  const activeCourts = Math.min(courtCount, Math.floor(total / 4));
+  const playing = activeCourts * 4;
+
+  // Sort by points/rating to establish rank order (this determines court assignment)
+  const byRank = [...allPlayers].sort((a, b) =>
+    isFirst
+      ? b.rating - a.rating
+      : b.sessionPoints - a.sessionPoints || b.wins - a.wins || b.rating - a.rating
+  );
+
+  let playingIds, bench;
+
+  if (isFirst || !prevRound || prevRound.bench.length === 0) {
+    // No bench rotation needed — top players by rank play, rest sit
+    playingIds = byRank.slice(0, playing).map(p => p.id);
+    bench = byRank.slice(playing).map(p => p.id);
+  } else {
+    // Bench rotation: players who sat last round must play this round if possible.
+    // Swap them in for the lowest-ranked players who played last round.
+    const prevBench = new Set(prevRound.bench);
+    const mustPlay = byRank.filter(p => prevBench.has(p.id));       // sat last round
+    const canSit   = byRank.filter(p => !prevBench.has(p.id));      // played last round
+
+    // Fill spots: mustPlay first, then top of canSit to reach `playing` count
+    const spotsLeft = playing - mustPlay.length;
+    const fromCanSit = canSit.slice(0, spotsLeft);                   // top scorers among those who played
+    bench = canSit.slice(spotsLeft).map(p => p.id);                  // lowest scorers sit this round
+
+    // Re-sort the playing pool by rank so Court 1 = highest pts
+    const playingPool = [...mustPlay, ...fromCanSit].sort((a, b) =>
+      b.sessionPoints - a.sessionPoints || b.wins - a.wins || b.rating - a.rating
+    );
+    playingIds = playingPool.map(p => p.id);
+  }
+
+  // Assign courts: top 4 → Court 1, next 4 → Court 2, etc.
+  const matches = [];
+  for (let i = 0; i < activeCourts; i++) {
+    const four = playingIds.slice(i * 4, i * 4 + 4);
+    const [teamA, teamB] = bestSplit(four, playerMap, usedPairs);
+    matches.push({ courtIndex: i, teamA, teamB, winner: null, scoreA: null, scoreB: null });
+  }
+
+  return { matches, bench };
+}
+
+function applyResults(playerMap, round) {
+  const updated = { ...playerMap };
+  for (const match of round.matches) {
+    if (!match.winner) continue;
+    const winners = match.winner === 'A' ? match.teamA : match.teamB;
+    const losers  = match.winner === 'A' ? match.teamB : match.teamA;
+    const wScore  = match.winner === 'A' ? (match.scoreA ?? 0) : (match.scoreB ?? 0);
+    const lScore  = match.winner === 'A' ? (match.scoreB ?? 0) : (match.scoreA ?? 0);
+    const margin  = wScore - lScore;
+
+    const winnerRating = winners.reduce((s,id) => s + updated[id].rating, 0) / 2;
+    const loserRating  = losers.reduce((s,id) => s + updated[id].rating, 0) / 2;
+    const upset = winnerRating < loserRating;
+
+    // Base points: 3 for upset win, 2 for normal win; +1 bonus per 5-pt margin
+    const winPts = (upset ? 3 : 2) + Math.floor(margin / 5);
+
+    winners.forEach(id => {
+      const p = updated[id];
+      updated[id] = { ...p, wins: p.wins + 1, sessionPoints: p.sessionPoints + winPts,
+        roundsPlayed: p.roundsPlayed + 1, pointsScored: p.pointsScored + wScore, pointsAgainst: p.pointsAgainst + lScore };
+    });
+    losers.forEach(id => {
+      const p = updated[id];
+      updated[id] = { ...p, sessionPoints: p.sessionPoints + 1,
+        roundsPlayed: p.roundsPlayed + 1, pointsScored: p.pointsScored + lScore, pointsAgainst: p.pointsAgainst + wScore };
+    });
+  }
+  round.bench.forEach(id => {
+    updated[id] = { ...updated[id], roundsOnBench: updated[id].roundsOnBench + 1 };
+  });
+  return updated;
+}
+
+// ─── StarRating Component ───────────────────────────────────────────────────
+function StarRating({ value, onChange, size = 'md' }) {
+  const sz = size === 'sm' ? 'text-lg' : 'text-2xl';
+  return (
+    <div className="flex gap-1">
+      {[1,2,3,4,5].map(s => (
+        <button key={s} type="button" onClick={() => onChange && onChange(s)}
+          className={`${sz} transition-transform hover:scale-125 ${s <= value ? 'star-active' : 'star-inactive'} ${onChange ? 'cursor-pointer' : 'cursor-default'}`}>
+          ★
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ─── Setup Screen ───────────────────────────────────────────────────────────
+function Setup({ onStart }) {
+  const [courts, setCourts] = useState(2);
+  const [name, setName] = useState('');
+  const [rating, setRating] = useState(3);
+  const [players, setPlayers] = useState([]);
+
+  const minPlayers = 4;
+  const canStart = players.length >= minPlayers;
+
+  const addPlayer = () => {
+    if (!name.trim()) return;
+    setPlayers(p => [...p, { id: uid(), name: name.trim(), rating, sessionPoints: 0, wins: 0, roundsPlayed: 0, roundsOnBench: 0, pointsScored: 0, pointsAgainst: 0 }]);
+    setName('');
+    setRating(3);
+  };
+
+  const removePlayer = (id) => setPlayers(p => p.filter(x => x.id !== id));
+
+  const handleKey = (e) => { if (e.key === 'Enter') addPlayer(); };
+
+  return (
+    <div className="min-h-screen text-white p-4 md:p-8">
+      {/* Header */}
+      <div className="text-center mb-10">
+        <div className="text-5xl mb-3">🏸</div>
+        <h1 className="text-4xl font-black tracking-tight text-green-400">BadmintonPro</h1>
+        <p className="text-slate-400 mt-2">Smart matchups for competitive doubles sessions</p>
+      </div>
+
+      <div className="max-w-2xl mx-auto space-y-6">
+        {/* Court Count */}
+        <div className="glass rounded-2xl p-6">
+          <h2 className="text-lg font-bold text-slate-200 mb-4 flex items-center gap-2">
+            <span>🏟️</span> Number of Courts
+          </h2>
+          <div className="flex gap-3">
+            {[1,2,3].map(c => (
+              <button key={c} onClick={() => setCourts(c)}
+                className={`flex-1 py-4 rounded-xl text-2xl font-black transition-all ${courts === c ? 'bg-green-500 text-white shadow-lg shadow-green-500/30 scale-105' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'}`}>
+                {c}
+                <div className="text-xs font-normal mt-1">{c === 1 ? 'Solo' : c === 2 ? 'Duo' : 'Triple'}</div>
+              </button>
+            ))}
+          </div>
+          <p className="text-slate-400 text-sm mt-3 text-center">Minimum 4 players required · extras sit on bench · courts used based on player count</p>
+        </div>
+
+        {/* Add Player */}
+        <div className="glass rounded-2xl p-6">
+          <h2 className="text-lg font-bold text-slate-200 mb-4 flex items-center gap-2">
+            <span>👤</span> Add Players
+          </h2>
+          <div className="space-y-4">
+            <input
+              value={name} onChange={e => setName(e.target.value)} onKeyDown={handleKey}
+              placeholder="Player name..."
+              className="w-full bg-slate-700 border border-slate-600 rounded-xl px-4 py-3 text-white placeholder-slate-400 focus:outline-none focus:border-green-500 focus:ring-1 focus:ring-green-500"
+            />
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm text-slate-400 mb-1">Skill Rating</div>
+                <StarRating value={rating} onChange={setRating} />
+              </div>
+              <button onClick={addPlayer} disabled={!name.trim()}
+                className="bg-green-500 hover:bg-green-400 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-bold py-3 px-6 rounded-xl transition-all active:scale-95">
+                Add Player
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Player Roster */}
+        {players.length > 0 && (
+          <div className="glass rounded-2xl p-6">
+            <h2 className="text-lg font-bold text-slate-200 mb-4 flex items-center gap-2">
+              <span>📋</span> Roster
+              <span className={`ml-auto badge ${players.length >= minPlayers ? 'bg-green-500/20 text-green-400' : 'bg-amber-500/20 text-amber-400'}`}>
+                {players.length}/{minPlayers}+ players
+              </span>
+            </h2>
+            <div className="space-y-2 max-h-64 overflow-y-auto scrollbar-thin pr-1">
+              {players.map((p, i) => (
+                <div key={p.id} className="flex items-center justify-between bg-slate-700/50 rounded-xl px-4 py-2.5">
+                  <div className="flex items-center gap-3">
+                    <span className="text-slate-500 text-sm w-5 text-right">{i + 1}</span>
+                    <span className="font-semibold">{p.name}</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <StarRating value={p.rating} size="sm" />
+                    <button onClick={() => removePlayer(p.id)} className="text-slate-500 hover:text-red-400 transition-colors text-lg leading-none">×</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Start Button */}
+        <button
+          onClick={() => onStart(courts, players)}
+          disabled={!canStart}
+          className="w-full py-4 rounded-2xl text-lg font-black transition-all
+            disabled:bg-slate-700 disabled:text-slate-500 disabled:cursor-not-allowed
+            bg-gradient-to-r from-green-500 to-emerald-400 text-white shadow-lg shadow-green-500/30 hover:shadow-green-500/50 hover:scale-[1.02] active:scale-[0.98]">
+          {canStart ? `🚀 Start Session · ${players.length} players · up to ${Math.min(courts, Math.floor(players.length / 4))} court${Math.min(courts, Math.floor(players.length / 4)) !== 1 ? 's' : ''}` : `Need at least 4 players to start`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── CourtCard Component ─────────────────────────────────────────────────────
+function CourtCard({ match, playerMap, courtNumber, onResult }) {
+  const teamA = match.teamA.map(id => playerMap[id]);
+  const teamB = match.teamB.map(id => playerMap[id]);
+  const ratingA = teamA.reduce((s, p) => s + p.rating, 0);
+  const ratingB = teamB.reduce((s, p) => s + p.rating, 0);
+  const [scoreA, setScoreA] = useState('');
+  const [scoreB, setScoreB] = useState('');
+  const [entering, setEntering] = useState(false);
+  const [error, setError] = useState('');
+
+  const courtColors = ['from-green-900 to-green-800', 'from-blue-900 to-blue-800', 'from-purple-900 to-purple-800'];
+  const courtIcons = ['🥇', '🥈', '🥉'];
+
+  const done = match.winner !== null;
+  const winnerLabel = done ? (match.winner === 'A' ? teamA : teamB).map(p=>p.name).join(' & ') : null;
+  const scoreDisplay = done ? `${match.scoreA ?? '—'} – ${match.scoreB ?? '—'}` : null;
+
+  const submit = () => {
+    const a = parseInt(scoreA, 10), b = parseInt(scoreB, 10);
+    if (isNaN(a) || isNaN(b) || a < 0 || b < 0) { setError('Enter valid scores'); return; }
+    if (a === b) { setError('Scores cannot be equal'); return; }
+    setError('');
+    onResult({ winner: a > b ? 'A' : 'B', scoreA: a, scoreB: b });
+    setEntering(false);
+  };
+
+  const inputCls = 'w-16 text-center bg-slate-700 border border-slate-500 rounded-lg px-2 py-2 text-white text-xl font-black focus:outline-none focus:border-green-400 focus:ring-1 focus:ring-green-400';
+
+  return (
+    <div className={`rounded-2xl overflow-hidden shadow-xl ${done ? 'opacity-80' : ''}`}>
+      {/* Header */}
+      <div className={`bg-gradient-to-r ${courtColors[courtNumber - 1]} px-5 py-3 flex items-center justify-between`}>
+        <div className="flex items-center gap-2">
+          <span className="text-xl">{courtIcons[courtNumber - 1]}</span>
+          <span className="font-black text-white text-lg">Court {courtNumber}</span>
+          {courtNumber === 1 && <span className="badge bg-yellow-500/20 text-yellow-300 ml-1">Elite</span>}
+        </div>
+        {done && <span className="badge bg-green-500/30 text-green-300">✓ Done</span>}
+      </div>
+
+      {/* Court surface */}
+      <div className="court-gradient p-1">
+        <div className="flex items-stretch gap-1 min-h-[120px]">
+          {/* Team A */}
+          <div className={`flex-1 rounded-l-xl p-2 sm:p-4 flex flex-col justify-center bg-black/20 ${match.winner === 'A' ? 'ring-2 ring-yellow-400' : ''}`}>
+            <div className="text-xs text-green-300 font-bold mb-2 uppercase tracking-widest">Team A</div>
+            {teamA.map(p => (
+              <div key={p.id} className="mb-1">
+                <span className="font-bold text-white text-sm block">{p.name}</span>
+                <StarRating value={p.rating} size="sm" />
+              </div>
+            ))}
+            <div className="mt-2 flex items-center gap-3 text-xs text-green-300">
+              <span>Rtg: <span className="font-bold text-white">{ratingA}</span></span>
+              {teamA[0].roundsPlayed > 0 && (
+                <span>Win%: <span className="font-bold text-amber-300">{Math.round(teamA[0].wins/teamA[0].roundsPlayed*100)}%</span></span>
+              )}
+            </div>
+          </div>
+
+          {/* VS / Score display */}
+          <div className="flex flex-col items-center justify-center px-2 py-4 gap-1">
+            {done ? (
+              <div className="text-center">
+                <div className="text-white font-black text-lg leading-none">{match.scoreA}</div>
+                <div className="text-slate-400 text-xs">–</div>
+                <div className="text-white font-black text-lg leading-none">{match.scoreB}</div>
+              </div>
+            ) : (
+              <div className="bg-white/10 rounded-full w-8 h-8 flex items-center justify-center text-white font-black text-xs">VS</div>
+            )}
+          </div>
+
+          {/* Team B */}
+          <div className={`flex-1 rounded-r-xl p-2 sm:p-4 flex flex-col justify-center bg-black/20 ${match.winner === 'B' ? 'ring-2 ring-yellow-400' : ''}`}>
+            <div className="text-xs text-green-300 font-bold mb-2 uppercase tracking-widest">Team B</div>
+            {teamB.map(p => (
+              <div key={p.id} className="mb-1">
+                <span className="font-bold text-white text-sm block">{p.name}</span>
+                <StarRating value={p.rating} size="sm" />
+              </div>
+            ))}
+            <div className="mt-2 flex items-center gap-3 text-xs text-green-300">
+              <span>Rtg: <span className="font-bold text-white">{ratingB}</span></span>
+              {teamB[0].roundsPlayed > 0 && (
+                <span>Win%: <span className="font-bold text-amber-300">{Math.round(teamB[0].wins/teamB[0].roundsPlayed*100)}%</span></span>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Result Area */}
+      <div className="bg-slate-800 px-4 py-3">
+        {done ? (
+          <div className="text-center text-sm text-green-400 font-semibold py-1">
+            🏆 {winnerLabel} won {scoreDisplay}
+          </div>
+        ) : entering ? (
+          <div className="space-y-2">
+            <div className="flex items-center justify-center gap-3">
+              <div className="text-center">
+                <div className="text-xs text-slate-400 mb-1">Team A</div>
+                <input type="number" min="0" max="99" value={scoreA}
+                  onChange={e => setScoreA(e.target.value)}
+                  className={inputCls} placeholder="0" />
+              </div>
+              <div className="text-slate-400 font-bold text-lg">–</div>
+              <div className="text-center">
+                <div className="text-xs text-slate-400 mb-1">Team B</div>
+                <input type="number" min="0" max="99" value={scoreB}
+                  onChange={e => setScoreB(e.target.value)}
+                  className={inputCls} placeholder="0" />
+              </div>
+            </div>
+            {error && <div className="text-red-400 text-xs text-center">{error}</div>}
+            <div className="flex gap-2">
+              <button onClick={() => { setEntering(false); setError(''); }}
+                className="px-4 py-2 bg-slate-600 hover:bg-slate-500 text-slate-300 rounded-lg text-sm transition-all">
+                ✕
+              </button>
+              <button onClick={submit}
+                className="flex-1 py-2 bg-green-500 hover:bg-green-400 text-white font-bold rounded-lg text-sm transition-all active:scale-95">
+                Confirm Score
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button onClick={() => setEntering(true)}
+            className="w-full py-2 bg-amber-500 hover:bg-amber-400 text-white font-bold rounded-lg text-sm transition-all active:scale-95">
+            Enter Score
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Leaderboard Component ───────────────────────────────────────────────────
+function Leaderboard({ playerMap, roundNum }) {
+  const ranked = useMemo(() =>
+    Object.values(playerMap).sort((a, b) =>
+      b.sessionPoints - a.sessionPoints || b.wins - a.wins
+    ),
+    [playerMap]
+  );
+
+  const medals = ['🥇','🥈','🥉'];
+
+  return (
+    <div className="glass rounded-2xl overflow-hidden">
+      <div className="bg-gradient-to-r from-amber-900/50 to-orange-900/50 px-4 py-3 flex items-center justify-between">
+        <h3 className="font-black text-amber-300 flex items-center gap-2"><span>🏆</span> Leaderboard</h3>
+        <span className="text-xs text-slate-400">By points</span>
+      </div>
+      <div className="divide-y divide-slate-700/50 max-h-[500px] overflow-y-auto scrollbar-thin">
+        {ranked.map((p, i) => {
+          const winPct = p.roundsPlayed > 0 ? Math.round(p.wins / p.roundsPlayed * 100) : null;
+          const diff = (p.pointsScored ?? 0) - (p.pointsAgainst ?? 0);
+          return (
+            <div key={p.id} className={`px-4 py-3 flex items-center gap-3 ${i === 0 ? 'bg-amber-500/10' : ''}`}>
+              <span className="text-lg w-6 text-center flex-shrink-0">
+                {i < 3 ? medals[i] : <span className="text-slate-500 text-sm font-bold">{i+1}</span>}
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="font-bold text-white truncate">{p.name}</div>
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
+                  <StarRating value={p.rating} size="sm" />
+                  <span className="text-slate-500 text-xs">{p.wins}W/{p.roundsPlayed}G</span>
+                  {winPct !== null && (
+                    <span className={`text-xs font-semibold ${winPct >= 50 ? 'text-green-400' : 'text-slate-400'}`}>{winPct}%</span>
+                  )}
+                  {p.roundsPlayed > 0 && (
+                    <span className={`text-xs font-semibold ${diff >= 0 ? 'text-blue-400' : 'text-red-400'}`}>
+                      {diff >= 0 ? '+' : ''}{diff}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <div className="text-right flex-shrink-0">
+                <div className="text-xl font-black text-green-400">{p.sessionPoints}</div>
+                <div className="text-xs text-slate-500">pts</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Persistence helpers ─────────────────────────────────────────────────────
+const SAVE_KEY = 'badminton_session_v1';
+function saveSession(data) {
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch(e) {}
+}
+function loadSession() {
+  try { const d = localStorage.getItem(SAVE_KEY); return d ? JSON.parse(d) : null; } catch(e) { return null; }
+}
+function clearSession() {
+  try { localStorage.removeItem(SAVE_KEY); } catch(e) {}
+}
+
+// ─── Session Screen ──────────────────────────────────────────────────────────
+function Session({ courtCount, initialPlayers, savedState, onEnd }) {
+  const [playerMap, setPlayerMap] = useState(() => {
+    if (savedState) return savedState.playerMap;
+    const m = {};
+    initialPlayers.forEach(p => { m[p.id] = p; });
+    return m;
+  });
+  const [rounds, setRounds] = useState(() => savedState ? savedState.rounds : []);
+  const [currentRound, setCurrentRound] = useState(() =>
+    savedState ? savedState.currentRound : generateRound(playerMap, null, courtCount, true, [])
+  );
+  const [roundNum, setRoundNum] = useState(() => savedState ? savedState.roundNum : 1);
+
+  // Persist whenever anything meaningful changes
+  const { useEffect } = React;
+  useEffect(() => {
+    if (!currentRound) return;
+    saveSession({ screen: 'session', courtCount, playerMap, rounds, currentRound, roundNum });
+  }, [playerMap, currentRound, roundNum]);
+
+  const allMatchesDone = currentRound && currentRound.matches.every(m => m.winner !== null);
+
+  const recordResult = (courtIndex, { winner, scoreA, scoreB }) => {
+    setCurrentRound(prev => ({
+      ...prev,
+      matches: prev.matches.map(m => m.courtIndex === courtIndex ? { ...m, winner, scoreA, scoreB } : m)
+    }));
+  };
+
+  const nextRound = () => {
+    const updated = applyResults(playerMap, currentRound);
+    setPlayerMap(updated);
+    setRounds(prev => [...prev, currentRound]);
+    const next = generateRound(updated, currentRound, courtCount, false, [...rounds, currentRound]);
+    setCurrentRound(next);
+    setRoundNum(n => n + 1);
+  };
+
+  const endSession = () => {
+    const final = applyResults(playerMap, currentRound);
+    clearSession();
+    onEnd(final, rounds.length + 1);
+  };
+
+  if (!currentRound) return <div className="text-white p-8 text-center">Loading...</div>;
+
+  const benchPlayers = currentRound.bench.map(id => playerMap[id]);
+
+  return (
+    <div className="min-h-screen text-white p-4 md:p-6">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-6 max-w-6xl mx-auto">
+        <div>
+          <div className="flex items-center gap-3">
+            <span className="text-3xl">🏸</span>
+            <h1 className="text-2xl font-black text-green-400">BadmintonPro</h1>
+          </div>
+          <div className="text-slate-400 text-sm mt-1">Round {roundNum} · {courtCount} Court{courtCount > 1 ? 's' : ''} · {Object.keys(playerMap).length} Players</div>
+        </div>
+        <div className="flex gap-2">
+          {allMatchesDone && (
+            <button onClick={nextRound}
+              className="bg-green-500 hover:bg-green-400 text-white font-bold py-2 px-5 rounded-xl text-sm transition-all active:scale-95 shadow-lg shadow-green-500/30">
+              Next Round →
+            </button>
+          )}
+          <button onClick={endSession}
+            className="bg-slate-600 hover:bg-slate-500 text-slate-200 font-bold py-2 px-4 rounded-xl text-sm transition-all">
+            End Session
+          </button>
+        </div>
+      </div>
+
+      <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Courts + Bench */}
+        <div className="lg:col-span-2 space-y-4">
+          {/* Adaptive mode banner */}
+          {roundNum > 1 && (
+            <div className="glass rounded-xl px-4 py-2.5 flex items-center gap-2 text-sm">
+              <span className="text-amber-400">⚡</span>
+              <span className="text-slate-300"><strong className="text-amber-300">Adaptive Mode</strong> — top performers on Court 1 face tougher competition</span>
+            </div>
+          )}
+
+          {/* Courts */}
+          {currentRound.matches.map(match => (
+            <CourtCard
+              key={match.courtIndex}
+              match={match}
+              playerMap={playerMap}
+              courtNumber={match.courtIndex + 1}
+              onResult={(result) => recordResult(match.courtIndex, result)}
+            />
+          ))}
+
+          {/* Bench */}
+          {benchPlayers.length > 0 && (
+            <div className="glass rounded-2xl p-4">
+              <h3 className="font-bold text-slate-300 mb-3 flex items-center gap-2">
+                <span>⏳</span> Sitting Out This Round
+              </h3>
+              <div className="flex flex-wrap gap-2">
+                {benchPlayers.map(p => (
+                  <div key={p.id} className="bg-slate-700 rounded-xl px-3 py-2 flex items-center gap-2">
+                    <span className="font-semibold text-sm">{p.name}</span>
+                    <StarRating value={p.rating} size="sm" />
+                    <span className="text-green-400 font-bold text-sm">{p.sessionPoints}pt</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Next round prompt */}
+          {allMatchesDone && (
+            <div className="glass rounded-2xl p-5 text-center border border-green-500/30">
+              <div className="text-2xl mb-2">✅</div>
+              <p className="text-green-400 font-bold mb-1">All matches complete!</p>
+              <p className="text-slate-400 text-sm mb-4">Leaderboard updated. Generate next round or end session.</p>
+              <button onClick={nextRound}
+                className="bg-green-500 hover:bg-green-400 text-white font-bold py-3 px-8 rounded-xl transition-all active:scale-95 shadow-lg shadow-green-500/30">
+                Generate Round {roundNum + 1} →
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Sidebar */}
+        <div className="space-y-4">
+          <Leaderboard playerMap={playerMap} roundNum={roundNum} />
+
+          {/* Point key */}
+          <div className="glass rounded-2xl p-4 text-xs text-slate-400 space-y-1.5">
+            <div className="font-bold text-slate-300 mb-2">Point System</div>
+            <div className="flex justify-between"><span>🏆 Win (equal/lower rated)</span><span className="text-green-400 font-bold">+2 pts</span></div>
+            <div className="flex justify-between"><span>⚡ Upset win</span><span className="text-yellow-400 font-bold">+3 pts</span></div>
+            <div className="flex justify-between"><span>📊 Margin bonus (per 5 pts)</span><span className="text-purple-400 font-bold">+1 pt</span></div>
+            <div className="flex justify-between"><span>🎯 Participation</span><span className="text-blue-400 font-bold">+1 pt</span></div>
+            <div className="flex justify-between"><span>⏳ Bench round</span><span className="text-slate-500 font-bold">+0 pts</span></div>
+            <div className="border-t border-slate-700 mt-2 pt-2 text-slate-500">
+              Round 2+: matchups use pts + win% + score diff
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Summary Screen ──────────────────────────────────────────────────────────
+function Summary({ playerMap, roundsPlayed, onRestart }) {
+  const ranked = Object.values(playerMap).sort((a,b) => b.sessionPoints - a.sessionPoints || b.wins - a.wins);
+  const mvp = ranked[0];
+  const mostGames = [...ranked].sort((a,b) => b.roundsPlayed - a.roundsPlayed)[0];
+
+  return (
+    <div className="min-h-screen text-white p-4 md:p-8">
+      <div className="max-w-2xl mx-auto">
+        {/* Trophy header */}
+        <div className="text-center mb-8">
+          <div className="text-6xl mb-3">🏆</div>
+          <h1 className="text-4xl font-black text-amber-400">Session Complete!</h1>
+          <p className="text-slate-400 mt-2">{roundsPlayed} rounds played · {Object.keys(playerMap).length} players</p>
+        </div>
+
+        {/* Highlight cards */}
+        <div className="grid grid-cols-2 gap-4 mb-6">
+          <div className="glass rounded-2xl p-4 text-center border border-amber-500/30">
+            <div className="text-3xl mb-1">👑</div>
+            <div className="text-xs text-amber-400 font-bold uppercase tracking-wider mb-1">MVP</div>
+            <div className="font-black text-white text-lg">{mvp.name}</div>
+            <div className="text-amber-400 font-bold">{mvp.sessionPoints} pts · {mvp.wins} wins</div>
+          </div>
+          <div className="glass rounded-2xl p-4 text-center border border-blue-500/30">
+            <div className="text-3xl mb-1">🎯</div>
+            <div className="text-xs text-blue-400 font-bold uppercase tracking-wider mb-1">Most Active</div>
+            <div className="font-black text-white text-lg">{mostGames.name}</div>
+            <div className="text-blue-400 font-bold">{mostGames.roundsPlayed} rounds played</div>
+          </div>
+        </div>
+
+        {/* Full leaderboard */}
+        <div className="glass rounded-2xl overflow-hidden mb-6">
+          <div className="bg-gradient-to-r from-slate-800 to-slate-700 px-5 py-3">
+            <h2 className="font-black text-white">Final Standings</h2>
+          </div>
+          <div className="divide-y divide-slate-700/50">
+            {ranked.map((p, i) => (
+              <div key={p.id} className={`px-5 py-3.5 flex items-center gap-4 ${i === 0 ? 'bg-amber-500/10' : ''}`}>
+                <span className="text-xl w-8 text-center">
+                  {i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : <span className="text-slate-500 font-bold text-sm">{i+1}</span>}
+                </span>
+                <div className="flex-1">
+                  <div className="font-bold text-white">{p.name}</div>
+                  <div className="flex items-center gap-3 text-xs text-slate-400 mt-0.5">
+                    <StarRating value={p.rating} size="sm" />
+                    <span>{p.wins} wins</span>
+                    <span>{p.roundsPlayed} games</span>
+                    <span>{p.roundsOnBench} bench</span>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="text-2xl font-black text-green-400">{p.sessionPoints}</div>
+                  <div className="text-xs text-slate-500">points</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <button onClick={onRestart}
+          className="w-full py-4 rounded-2xl bg-gradient-to-r from-green-500 to-emerald-400 text-white font-black text-lg shadow-lg shadow-green-500/30 hover:scale-[1.02] active:scale-[0.98] transition-all">
+          🏸 New Session
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── App Root ────────────────────────────────────────────────────────────────
+function App() {
+  const saved = loadSession();
+  const [screen, setScreen] = useState(saved ? saved.screen : 'setup');
+  const [sessionData, setSessionData] = useState(saved ? { courts: saved.courtCount, players: Object.values(saved.playerMap), savedState: saved } : null);
+
+  const handleStart = (courts, players) => {
+    clearSession();
+    setSessionData({ courts, players, savedState: null, finalMap: null, rounds: 0 });
+    setScreen('session');
+  };
+
+  const handleEnd = (finalMap, rounds) => {
+    setSessionData(prev => ({ ...prev, finalMap, rounds }));
+    setScreen('summary');
+  };
+
+  const handleRestart = () => {
+    clearSession();
+    _id = 0;
+    setSessionData(null);
+    setScreen('setup');
+  };
+
+  if (screen === 'setup') return <Setup onStart={handleStart} />;
+  if (screen === 'session') return (
+    <Session
+      courtCount={sessionData.courts}
+      initialPlayers={sessionData.players}
+      savedState={sessionData.savedState}
+      onEnd={handleEnd}
+    />
+  );
+  if (screen === 'summary') return (
+    <Summary
+      playerMap={sessionData.finalMap}
+      roundsPlayed={sessionData.rounds}
+      onRestart={handleRestart}
+    />
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('/service-worker.js'));
+  }
+</script>
+</body>
+</html>
