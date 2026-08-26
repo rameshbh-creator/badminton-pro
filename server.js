@@ -50,8 +50,9 @@ function readBody(req) {
 }
 
 function tokenOf(req) {
-  const header = req.headers.authorization || '';
-  return header.startsWith('Bearer ') ? header.slice(7) : '';
+  const bearer = req.headers.authorization || '';
+  if (bearer.startsWith('Bearer ')) return bearer.slice(7);
+  return String(req.headers['x-club-token'] || '');
 }
 
 function resolveStaticPath(root, urlPath) {

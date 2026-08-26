@@ -61,6 +61,16 @@ async function call(method, route, { body, token } = {}) {
   assert.strictEqual(snap.status, 200);
   assert.strictEqual(snap.data.state.screen, 'setup');
 
+  // Netlify 200-rewrites strip Authorization; the client also sends X-Club-Token.
+  const rewriteSafe = parse(await handler({
+    httpMethod: 'GET',
+    rawUrl: 'https://badmintonmatchup.netlify.app/api/state',
+    path: '/api/state',
+    headers: { 'x-club-token': login.data.token },
+  }));
+  assert.strictEqual(rewriteSafe.status, 200);
+  assert.strictEqual(rewriteSafe.data.ok, true);
+
   const rosterDenied = await call('POST', 'roster', {
     body: { action: 'add', name: 'Ajay', rating: 4 },
   });

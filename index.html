@@ -609,7 +609,7 @@ async function api(path, { method = 'GET', token, body } = {}) {
     method,
     headers: {
       'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(token ? { Authorization: `Bearer ${token}`, 'X-Club-Token': token } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
   });

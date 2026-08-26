@@ -24,8 +24,10 @@ function json(status, body) {
 }
 
 function tokenOf(event) {
-  const header = event.headers.authorization || event.headers.Authorization || '';
-  return header.startsWith('Bearer ') ? header.slice(7) : '';
+  const headers = event.headers || {};
+  const bearer = headers.authorization || headers.Authorization || '';
+  if (bearer.startsWith('Bearer ')) return bearer.slice(7);
+  return String(headers['x-club-token'] || headers['X-Club-Token'] || '');
 }
 
 function parseBody(event) {
