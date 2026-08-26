@@ -8,6 +8,7 @@ const originalLoad = Module._load;
 Module._load = function(request, parent, isMain) {
   if (request === '@netlify/blobs') {
     return {
+      connectLambda() {},
       getStore() {
         return {
           async get(key, { type } = {}) {

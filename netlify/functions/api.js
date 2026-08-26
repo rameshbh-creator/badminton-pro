@@ -1,4 +1,4 @@
-const { getStore } = require('@netlify/blobs');
+const { connectLambda, getStore } = require('@netlify/blobs');
 const {
   login,
   getSnapshot,
@@ -59,6 +59,7 @@ async function saveClub(club) {
 
 exports.handler = async (event) => {
   try {
+    connectLambda(event);
     const route = apiRoute(event);
     const club = await loadClub();
 
