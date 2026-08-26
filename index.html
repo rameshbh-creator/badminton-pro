@@ -10,6 +10,8 @@
   <meta name="apple-mobile-web-app-title" content="BadmintonPro">
   <meta name="theme-color" content="#16a34a">
   <link rel="apple-touch-icon" href="icon-192.png">
+  <script src="score.js"></script>
+  <script src="round.js"></script>
   <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -44,7 +46,7 @@
 <div id="root"></div>
 
 <script type="text/babel">
-const { useState, useCallback, useMemo } = React;
+const { useState, useMemo, useEffect, useRef } = React;
 
 // ─── Types (as JSDoc) ───────────────────────────────────────────────────────
 // Player: { id, name, rating, sessionPoints, wins, roundsPlayed, roundsOnBench, lastRoundBenched }
@@ -52,33 +54,10 @@ const { useState, useCallback, useMemo } = React;
 // Round: { matches:[], bench:[] }
 
 // ─── Utilities ──────────────────────────────────────────────────────────────
-let _id = 0;
-const uid = () => `p${++_id}`;
+const uid = () => `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
-function pairKey(a, b) { return a < b ? `${a}|${b}` : `${b}|${a}`; }
-
-function bestSplit(four, players, usedPairs) {
-  // All 3 ways to split 4 players into 2 pairs
-  const combos = [
-    [[0,1],[2,3]], [[0,2],[1,3]], [[0,3],[1,2]]
-  ];
-  let best = null, bestDiff = Infinity, bestRepeats = Infinity;
-  for (const [[a,b],[c,d]] of combos) {
-    const idA1 = four[a], idA2 = four[b], idB1 = four[c], idB2 = four[d];
-    const rA = players[idA1].rating + players[idA2].rating;
-    const rB = players[idB1].rating + players[idB2].rating;
-    const diff = Math.abs(rA - rB);
-    // Count how many of these pairings were used before
-    const repeats = (usedPairs.has(pairKey(idA1, idA2)) ? 1 : 0)
-                  + (usedPairs.has(pairKey(idB1, idB2)) ? 1 : 0);
-    // Prefer fewest repeated pairs first, then most balanced rating
-    if (repeats < bestRepeats || (repeats === bestRepeats && diff < bestDiff)) {
-      bestRepeats = repeats; bestDiff = diff;
-      best = [[idA1, idA2], [idB1, idB2]];
-    }
-  }
-  return best;
-}
+// pairKey, bestSplit, generateRound live in round.js (loaded above) so the
+// round-generation logic can be unit tested with plain node.
 
 // Composite skill score used for adaptive matchups (round 2+)
 // Blends session points, win%, and score differential
@@ -87,63 +66,6 @@ function adaptiveScore(p) {
   const pointDiff = p.roundsPlayed > 0 ? ((p.pointsScored ?? 0) - (p.pointsAgainst ?? 0)) / p.roundsPlayed : 0;
   // 50% points, 30% win%, 20% normalised score diff
   return p.sessionPoints * 0.5 + winPct * 20 * 0.3 + pointDiff * 0.2;
-}
-
-function generateRound(playerMap, prevRound, courtCount, isFirst, allPastRounds = []) {
-  // Build set of all previous teammate pairings to avoid repeating
-  const usedPairs = new Set();
-  for (const round of allPastRounds) {
-    for (const match of round.matches) {
-      usedPairs.add(pairKey(match.teamA[0], match.teamA[1]));
-      usedPairs.add(pairKey(match.teamB[0], match.teamB[1]));
-    }
-  }
-  const allPlayers = Object.values(playerMap).filter(p => p.active !== false);
-  const total = allPlayers.length;
-  const activeCourts = Math.min(courtCount, Math.floor(total / 4));
-  const playing = activeCourts * 4;
-
-  // Sort by points/rating to establish rank order (this determines court assignment)
-  const byRank = [...allPlayers].sort((a, b) =>
-    isFirst
-      ? b.rating - a.rating
-      : b.sessionPoints - a.sessionPoints || b.wins - a.wins || b.rating - a.rating
-  );
-
-  let playingIds, bench;
-
-  if (isFirst || !prevRound || prevRound.bench.length === 0) {
-    // No bench rotation needed — top players by rank play, rest sit
-    playingIds = byRank.slice(0, playing).map(p => p.id);
-    bench = byRank.slice(playing).map(p => p.id);
-  } else {
-    // Bench rotation: players who sat last round must play this round if possible.
-    // Swap them in for the lowest-ranked players who played last round.
-    const prevBench = new Set(prevRound.bench);
-    const mustPlay = byRank.filter(p => prevBench.has(p.id));       // sat last round
-    const canSit   = byRank.filter(p => !prevBench.has(p.id));      // played last round
-
-    // Fill spots: mustPlay first, then top of canSit to reach `playing` count
-    const spotsLeft = playing - mustPlay.length;
-    const fromCanSit = canSit.slice(0, spotsLeft);                   // top scorers among those who played
-    bench = canSit.slice(spotsLeft).map(p => p.id);                  // lowest scorers sit this round
-
-    // Re-sort the playing pool by rank so Court 1 = highest pts
-    const playingPool = [...mustPlay, ...fromCanSit].sort((a, b) =>
-      b.sessionPoints - a.sessionPoints || b.wins - a.wins || b.rating - a.rating
-    );
-    playingIds = playingPool.map(p => p.id);
-  }
-
-  // Assign courts: top 4 → Court 1, next 4 → Court 2, etc.
-  const matches = [];
-  for (let i = 0; i < activeCourts; i++) {
-    const four = playingIds.slice(i * 4, i * 4 + 4);
-    const [teamA, teamB] = bestSplit(four, playerMap, usedPairs);
-    matches.push({ courtIndex: i, teamA, teamB, winner: null, scoreA: null, scoreB: null });
-  }
-
-  return { matches, bench };
 }
 
 function applyResults(playerMap, round) {
@@ -196,34 +118,118 @@ function StarRating({ value, onChange, size = 'md' }) {
 }
 
 // ─── Setup Screen ───────────────────────────────────────────────────────────
-function Setup({ onStart }) {
-  const [courts, setCourts] = useState(2);
+function ConfirmDialog({ title, message, confirmLabel, onConfirm, onCancel }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.7)' }}>
+      <div className="glass rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl">
+        <div className="px-5 py-4 border-b border-slate-700">
+          <h2 className="font-bold text-lg text-white">{title}</h2>
+        </div>
+        <div className="px-5 py-4">
+          <p className="text-slate-300 text-sm leading-relaxed">{message}</p>
+        </div>
+        <div className="px-5 py-4 border-t border-slate-700 flex gap-3">
+          <button type="button" onClick={onCancel}
+            className="flex-1 py-2.5 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 font-semibold transition-colors">
+            No
+          </button>
+          <button type="button" onClick={onConfirm}
+            className="flex-1 py-2.5 rounded-xl bg-red-500 hover:bg-red-400 text-white font-semibold transition-colors">
+            {confirmLabel || 'Yes'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WhoBar({ userName, online, onLogout }) {
+  return (
+    <div className="max-w-2xl mx-auto mb-4 flex items-center justify-between gap-3 text-sm">
+      <div className="text-slate-400 truncate">
+        <span className="text-white font-semibold">{userName}</span>
+        {online && online.length > 0 && (
+          <span className="ml-2">· online {online.join(', ')}</span>
+        )}
+      </div>
+      <button type="button" onClick={onLogout} className="text-slate-400 hover:text-white shrink-0">Log out</button>
+    </div>
+  );
+}
+
+function Setup({ courts, scoreTarget, players, roster, onPatch, onRoster, onStart, userName, online, onLogout }) {
   const [name, setName] = useState('');
   const [rating, setRating] = useState(3);
-  const [players, setPlayers] = useState([]);
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const [expandedHistoryId, setExpandedHistoryId] = useState(null);
 
   const minPlayers = 4;
   const canStart = players.length >= minPlayers;
+  const tonightIds = new Set(players.map(p => p.id));
 
-  const addPlayer = () => {
+  const addPlayer = async () => {
     if (!name.trim()) return;
-    setPlayers(p => [...p, { id: uid(), name: name.trim(), rating, active: true, sessionPoints: 0, wins: 0, roundsPlayed: 0, roundsOnBench: 0, pointsScored: 0, pointsAgainst: 0 }]);
+    const result = await onRoster({ action: 'add', name: name.trim(), rating });
+    if (!result || !result.ok) return;
+    const saved = result.player;
+    if (!tonightIds.has(saved.id)) {
+      onPatch(s => ({ players: [...(s.players || []), sessionPlayerFromRoster(saved)] }));
+    }
     setName('');
     setRating(3);
   };
 
-  const removePlayer = (id) => setPlayers(p => p.filter(x => x.id !== id));
+  const addToTonight = (saved) => {
+    if (tonightIds.has(saved.id)) return;
+    onPatch(s => ({ players: [...(s.players || []), sessionPlayerFromRoster(saved)] }));
+  };
+
+  const removeFromTonight = (id) => onPatch(s => ({ players: (s.players || []).filter(x => x.id !== id) }));
+
+  const updateSavedRating = async (id, nextRating) => {
+    const result = await onRoster({ action: 'update', id, rating: nextRating });
+    if (!result || !result.ok) return;
+    if (tonightIds.has(id)) {
+      onPatch(s => ({
+        players: (s.players || []).map(p => p.id === id ? { ...p, rating: nextRating } : p),
+      }));
+    }
+  };
+
+  const removeSaved = async (saved) => {
+    const result = await onRoster({ action: 'remove', id: saved.id });
+    if (!result || !result.ok) return;
+    if (tonightIds.has(saved.id)) removeFromTonight(saved.id);
+    setPendingDelete(null);
+  };
+
+  const addAllSaved = () => {
+    const missing = roster.filter(r => !tonightIds.has(r.id));
+    if (!missing.length) return;
+    onPatch(s => ({ players: [...(s.players || []), ...missing.map(sessionPlayerFromRoster)] }));
+  };
 
   const handleKey = (e) => { if (e.key === 'Enter') addPlayer(); };
 
   return (
     <div className="min-h-screen text-white p-4 md:p-8">
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Delete saved player?"
+          message={`Remove ${pendingDelete.name} from the Saved Club Roster? This cannot be undone.`}
+          confirmLabel="Yes, delete"
+          onConfirm={() => removeSaved(pendingDelete)}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
       {/* Header */}
       <div className="text-center mb-10">
         <div className="text-5xl mb-3">🏸</div>
         <h1 className="text-4xl font-black tracking-tight text-green-400">BadmintonPro</h1>
-        <p className="text-slate-400 mt-2">Smart matchups for competitive doubles sessions</p>
+        <p className="text-slate-400 mt-2">Men's doubles · smart matchups for competitive sessions</p>
       </div>
+
+      <WhoBar userName={userName} online={online} onLogout={onLogout} />
 
       <div className="max-w-2xl mx-auto space-y-6">
         {/* Court Count */}
@@ -233,7 +239,7 @@ function Setup({ onStart }) {
           </h2>
           <div className="flex gap-3">
             {[1,2,3].map(c => (
-              <button key={c} onClick={() => setCourts(c)}
+              <button key={c} onClick={() => onPatch({ courts: c })}
                 className={`flex-1 py-4 rounded-xl text-2xl font-black transition-all ${courts === c ? 'bg-green-500 text-white shadow-lg shadow-green-500/30 scale-105' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'}`}>
                 {c}
                 <div className="text-xs font-normal mt-1">{c === 1 ? 'Solo' : c === 2 ? 'Duo' : 'Triple'}</div>
@@ -243,10 +249,27 @@ function Setup({ onStart }) {
           <p className="text-slate-400 text-sm mt-3 text-center">Minimum 4 players required · extras sit on bench · courts used based on player count</p>
         </div>
 
-        {/* Add Player */}
+        {/* Score format */}
         <div className="glass rounded-2xl p-6">
           <h2 className="text-lg font-bold text-slate-200 mb-4 flex items-center gap-2">
-            <span>👤</span> Add Players
+            <span>🎯</span> Game Format
+          </h2>
+          <div className="flex gap-3">
+            {[15, 21].map(n => (
+              <button key={n} type="button" onClick={() => onPatch({ scoreTarget: n })}
+                className={`flex-1 py-4 rounded-xl text-2xl font-black transition-all ${scoreTarget === n ? 'bg-green-500 text-white shadow-lg shadow-green-500/30 scale-105' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'}`}>
+                {n}
+                <div className="text-xs font-normal mt-1">First to {n}</div>
+              </button>
+            ))}
+          </div>
+          <p className="text-slate-400 text-sm mt-3 text-center">No win-by-2 · stop early and the leading score wins · points follow the recorded score</p>
+        </div>
+
+        {/* Save player */}
+        <div className="glass rounded-2xl p-6">
+          <h2 className="text-lg font-bold text-slate-200 mb-4 flex items-center gap-2">
+            <span>💾</span> Save Player
           </h2>
           <div className="space-y-4">
             <input
@@ -261,21 +284,90 @@ function Setup({ onStart }) {
               </div>
               <button onClick={addPlayer} disabled={!name.trim()}
                 className="bg-green-500 hover:bg-green-400 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-bold py-3 px-6 rounded-xl transition-all active:scale-95">
-                Add Player
+                Save & Add Tonight
               </button>
             </div>
           </div>
+          <p className="text-slate-500 text-xs mt-3">Saved to the club roster with skill rating and point history. Persists across sessions.</p>
         </div>
 
-        {/* Player Roster */}
+        {/* Saved club roster */}
+        {roster.length > 0 && (
+          <div className="glass rounded-2xl p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <h2 className="text-lg font-bold text-slate-200 flex items-center gap-2">
+                <span>📁</span> Saved Club Roster
+              </h2>
+              <span className="badge bg-slate-600/40 text-slate-300 ml-auto">{roster.length} saved</span>
+            </div>
+            <div className="space-y-2 max-h-80 overflow-y-auto scrollbar-thin pr-1">
+              {roster.map((p) => {
+                const history = p.history || [];
+                const hasHistory = history.length > 0;
+                const expanded = expandedHistoryId === p.id;
+                return (
+                <div key={p.id} className="bg-slate-700/50 rounded-xl px-4 py-2.5 gap-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <span className="font-semibold truncate block">{p.name}</span>
+                      <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                        <span className="text-xs text-green-400 font-semibold">{p.totalPoints || 0} pts total</span>
+                        {(p.sessionsPlayed || 0) > 0 && (
+                          <span className="text-xs text-slate-400">{p.sessionsPlayed} session{p.sessionsPlayed === 1 ? '' : 's'}</span>
+                        )}
+                        {hasHistory && (
+                          <button type="button" onClick={() => setExpandedHistoryId(expanded ? null : p.id)}
+                            className="text-xs text-slate-400 hover:text-slate-200 underline">
+                            {expanded ? 'Hide history' : 'Show history'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <StarRating value={p.rating} onChange={(v) => updateSavedRating(p.id, v)} size="sm" />
+                      {!tonightIds.has(p.id) ? (
+                        <button type="button" onClick={() => addToTonight(p)} className="text-xs bg-green-500/20 text-green-400 hover:bg-green-500/30 px-2 py-1 rounded-lg font-semibold">+ Tonight</button>
+                      ) : (
+                        <span className="text-xs bg-slate-600/40 text-slate-400 px-2 py-1 rounded-lg font-semibold">Tonight</span>
+                      )}
+                      <button type="button" onClick={() => setPendingDelete(p)} title={`Remove ${p.name} from saved roster`}
+                        className="text-xs bg-red-500/15 text-red-400 hover:bg-red-500/25 px-2 py-1 rounded-lg font-semibold transition-colors">
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                  {expanded && hasHistory && (
+                    <div className="mt-2 pt-2 border-t border-slate-600/60 space-y-1.5">
+                      {history.map((h, i) => (
+                        <div key={`${p.id}-${h.date}-${i}`} className="flex items-center justify-between text-xs">
+                          <span className="text-slate-400">{h.date}</span>
+                          <span className="text-green-400 font-semibold">{h.sessionPoints} pts</span>
+                          <span className="text-slate-500">{h.wins}W · {h.roundsPlayed}G</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );})}
+            </div>
+          </div>
+        )}
+
+        {/* Tonight's lineup */}
         {players.length > 0 && (
           <div className="glass rounded-2xl p-6">
             <h2 className="text-lg font-bold text-slate-200 mb-4 flex items-center gap-2">
-              <span>📋</span> Roster
+              <span>📋</span> Tonight's Lineup
               <span className={`ml-auto badge ${players.length >= minPlayers ? 'bg-green-500/20 text-green-400' : 'bg-amber-500/20 text-amber-400'}`}>
                 {players.length}/{minPlayers}+ players
               </span>
             </h2>
+            {roster.length > players.length && (
+              <button type="button" onClick={addAllSaved}
+                className="mb-3 w-full py-2 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-semibold">
+                Add all saved players to tonight
+              </button>
+            )}
             <div className="space-y-2 max-h-64 overflow-y-auto scrollbar-thin pr-1">
               {players.map((p, i) => (
                 <div key={p.id} className="flex items-center justify-between bg-slate-700/50 rounded-xl px-4 py-2.5">
@@ -285,7 +377,7 @@ function Setup({ onStart }) {
                   </div>
                   <div className="flex items-center gap-3">
                     <StarRating value={p.rating} size="sm" />
-                    <button onClick={() => removePlayer(p.id)} className="text-slate-500 hover:text-red-400 transition-colors text-lg leading-none">×</button>
+                    <button onClick={() => removeFromTonight(p.id)} className="text-slate-500 hover:text-red-400 transition-colors text-lg leading-none" title="Remove from tonight">×</button>
                   </div>
                 </div>
               ))}
@@ -295,12 +387,12 @@ function Setup({ onStart }) {
 
         {/* Start Button */}
         <button
-          onClick={() => onStart(courts, players)}
+          onClick={onStart}
           disabled={!canStart}
           className="w-full py-4 rounded-2xl text-lg font-black transition-all
             disabled:bg-slate-700 disabled:text-slate-500 disabled:cursor-not-allowed
             bg-gradient-to-r from-green-500 to-emerald-400 text-white shadow-lg shadow-green-500/30 hover:shadow-green-500/50 hover:scale-[1.02] active:scale-[0.98]">
-          {canStart ? `🚀 Start Session · ${players.length} players · up to ${Math.min(courts, Math.floor(players.length / 4))} court${Math.min(courts, Math.floor(players.length / 4)) !== 1 ? 's' : ''}` : `Need at least 4 players to start`}
+          {canStart ? `🚀 Start Men's Doubles · to ${scoreTarget} · ${players.length} players · up to ${Math.min(courts, Math.floor(players.length / 4))} court${Math.min(courts, Math.floor(players.length / 4)) !== 1 ? 's' : ''}` : `Need at least 4 players to start`}
         </button>
       </div>
     </div>
@@ -308,7 +400,7 @@ function Setup({ onStart }) {
 }
 
 // ─── CourtCard Component ─────────────────────────────────────────────────────
-function CourtCard({ match, playerMap, courtNumber, onResult }) {
+function CourtCard({ match, playerMap, courtNumber, onResult, scoreTarget }) {
   const teamA = match.teamA.map(id => playerMap[id]);
   const teamB = match.teamB.map(id => playerMap[id]);
   const ratingA = teamA.reduce((s, p) => s + p.rating, 0);
@@ -324,13 +416,13 @@ function CourtCard({ match, playerMap, courtNumber, onResult }) {
   const done = match.winner !== null;
   const winnerLabel = done ? (match.winner === 'A' ? teamA : teamB).map(p=>p.name).join(' & ') : null;
   const scoreDisplay = done ? `${match.scoreA ?? '—'} – ${match.scoreB ?? '—'}` : null;
+  const stoppedEarly = done && Math.max(match.scoreA ?? 0, match.scoreB ?? 0) < scoreTarget;
 
   const submit = () => {
-    const a = parseInt(scoreA, 10), b = parseInt(scoreB, 10);
-    if (isNaN(a) || isNaN(b) || a < 0 || b < 0) { setError('Enter valid scores'); return; }
-    if (a === b) { setError('Scores cannot be equal'); return; }
+    const result = validateMatchScore(parseInt(scoreA, 10), parseInt(scoreB, 10), scoreTarget);
+    if (!result.ok) { setError(result.error); return; }
     setError('');
-    onResult({ winner: a > b ? 'A' : 'B', scoreA: a, scoreB: b });
+    onResult({ winner: result.winner, scoreA: result.scoreA, scoreB: result.scoreB });
     setEntering(false);
   };
 
@@ -404,21 +496,22 @@ function CourtCard({ match, playerMap, courtNumber, onResult }) {
       <div className="bg-slate-800 px-4 py-3">
         {done ? (
           <div className="text-center text-sm text-green-400 font-semibold py-1">
-            🏆 {winnerLabel} won {scoreDisplay}
+            🏆 {winnerLabel} won {scoreDisplay}{stoppedEarly ? ' · stopped early' : ''}
           </div>
         ) : entering ? (
           <div className="space-y-2">
+            <p className="text-center text-xs text-slate-400">First to {scoreTarget} · no win-by-2 · stop early and the leader wins</p>
             <div className="flex items-center justify-center gap-3">
               <div className="text-center">
                 <div className="text-xs text-slate-400 mb-1">Team A</div>
-                <input type="number" min="0" max="99" value={scoreA}
+                <input type="number" min="0" max={scoreTarget} value={scoreA}
                   onChange={e => setScoreA(e.target.value)}
                   className={inputCls} placeholder="0" />
               </div>
               <div className="text-slate-400 font-bold text-lg">–</div>
               <div className="text-center">
                 <div className="text-xs text-slate-400 mb-1">Team B</div>
-                <input type="number" min="0" max="99" value={scoreB}
+                <input type="number" min="0" max={scoreTarget} value={scoreB}
                   onChange={e => setScoreB(e.target.value)}
                   className={inputCls} placeholder="0" />
               </div>
@@ -500,19 +593,100 @@ function Leaderboard({ playerMap, roundNum }) {
 }
 
 // ─── Persistence helpers ─────────────────────────────────────────────────────
-const SAVE_KEY = 'badminton_session_v1';
-function saveSession(data) {
-  try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch(e) {}
+const AUTH_KEY = 'badminton_auth_v1';
+function loadAuth() {
+  try { return JSON.parse(sessionStorage.getItem(AUTH_KEY) || 'null'); } catch(e) { return null; }
 }
-function loadSession() {
-  try { const d = localStorage.getItem(SAVE_KEY); return d ? JSON.parse(d) : null; } catch(e) { return null; }
+function saveAuth(auth) {
+  try { sessionStorage.setItem(AUTH_KEY, JSON.stringify(auth)); } catch(e) {}
 }
-function clearSession() {
-  try { localStorage.removeItem(SAVE_KEY); } catch(e) {}
+function clearAuth() {
+  try { sessionStorage.removeItem(AUTH_KEY); } catch(e) {}
+}
+
+async function api(path, { method = 'GET', token, body } = {}) {
+  const res = await fetch(path, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({ ok: false, error: 'Server error' }));
+  return { status: res.status, data };
+}
+
+function sessionPlayerFromRoster(r) {
+  return {
+    id: r.id,
+    name: r.name,
+    rating: r.rating,
+    active: true,
+    sessionPoints: 0,
+    wins: 0,
+    roundsPlayed: 0,
+    roundsOnBench: 0,
+    pointsScored: 0,
+    pointsAgainst: 0,
+  };
+}
+
+function Login({ onLoggedIn }) {
+  const [name, setName] = useState('');
+  const [pin, setPin] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      const { data } = await api('/api/login', { method: 'POST', body: { name, pin } });
+      if (!data.ok) { setError(data.error || 'Login failed'); setBusy(false); return; }
+      onLoggedIn({ token: data.token, name: data.name });
+    } catch (err) {
+      setError('Cannot reach the club server. Use node server.js and open the printed URL.');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen text-white p-4 md:p-8 flex items-center justify-center">
+      <form onSubmit={submit} className="w-full max-w-md space-y-6">
+        <div className="text-center">
+          <div className="text-5xl mb-3">🏸</div>
+          <h1 className="text-4xl font-black tracking-tight text-green-400">BadmintonPro</h1>
+          <p className="text-slate-400 mt-2">Club login · men's doubles</p>
+        </div>
+        <div className="glass rounded-2xl p-6 space-y-4">
+          <div>
+            <div className="text-sm text-slate-400 mb-1">Your name</div>
+            <input value={name} onChange={e => setName(e.target.value)} autoFocus
+              placeholder="e.g. Ramesh"
+              className="w-full bg-slate-700 border border-slate-600 rounded-xl px-4 py-3 text-white placeholder-slate-400 focus:outline-none focus:border-green-500" />
+          </div>
+          <div>
+            <div className="text-sm text-slate-400 mb-1">Club PIN</div>
+            <input value={pin} onChange={e => setPin(e.target.value)} type="password" inputMode="numeric"
+              placeholder="Shared PIN"
+              className="w-full bg-slate-700 border border-slate-600 rounded-xl px-4 py-3 text-white placeholder-slate-400 focus:outline-none focus:border-green-500" />
+          </div>
+          {error && <div className="text-red-400 text-sm">{error}</div>}
+          <button type="submit" disabled={busy || !name.trim() || !pin.trim()}
+            className="w-full py-3 rounded-xl bg-green-500 hover:bg-green-400 disabled:bg-slate-600 disabled:text-slate-400 font-bold">
+            {busy ? 'Joining…' : 'Join club'}
+          </button>
+          <p className="text-slate-500 text-xs text-center">Everyone uses the same club PIN: 2026. Enter your own name.</p>
+        </div>
+      </form>
+    </div>
+  );
 }
 
 // ─── Manage Players Modal ────────────────────────────────────────────────────
-function ManagePlayersModal({ playerMap, onUpdate, onClose }) {
+function ManagePlayersModal({ playerMap, onUpdate, onRoster, onClose }) {
   const players = Object.values(playerMap).sort((a, b) => b.sessionPoints - a.sessionPoints);
   const [newName, setNewName] = React.useState('');
   const [newRating, setNewRating] = React.useState(3);
@@ -521,12 +695,14 @@ function ManagePlayersModal({ playerMap, onUpdate, onClose }) {
     onUpdate(prev => ({ ...prev, [id]: { ...prev[id], active: prev[id].active === false ? true : false } }));
   };
 
-  const addNew = () => {
+  const addNew = async () => {
     if (!newName.trim()) return;
-    const id = uid();
+    const result = await onRoster({ action: 'add', name: newName.trim(), rating: newRating });
+    if (!result || !result.ok) return;
+    const saved = result.player;
     onUpdate(prev => ({
       ...prev,
-      [id]: { id, name: newName.trim(), rating: newRating, active: true, sessionPoints: 0, wins: 0, roundsPlayed: 0, roundsOnBench: 0, pointsScored: 0, pointsAgainst: 0 }
+      [saved.id]: sessionPlayerFromRoster(saved),
     }));
     setNewName('');
     setNewRating(3);
@@ -586,54 +762,39 @@ function ManagePlayersModal({ playerMap, onUpdate, onClose }) {
 }
 
 // ─── Session Screen ──────────────────────────────────────────────────────────
-function Session({ courtCount, initialPlayers, savedState, onEnd }) {
-  const [playerMap, setPlayerMap] = useState(() => {
-    if (savedState) return savedState.playerMap;
-    const m = {};
-    initialPlayers.forEach(p => { m[p.id] = p; });
-    return m;
-  });
-  const [rounds, setRounds] = useState(() => savedState ? savedState.rounds : []);
-  const [currentRound, setCurrentRound] = useState(() =>
-    savedState ? savedState.currentRound : generateRound(playerMap, null, courtCount, true, [])
-  );
-  const [roundNum, setRoundNum] = useState(() => savedState ? savedState.roundNum : 1);
+function Session({ courtCount, scoreTarget, playerMap, rounds, currentRound, roundNum, onPatch, onRoster, onEnd, userName, online, onLogout }) {
   const [showManage, setShowManage] = useState(false);
-
-  // Persist whenever anything meaningful changes
-  const { useEffect } = React;
-  useEffect(() => {
-    if (!currentRound) return;
-    saveSession({ screen: 'session', courtCount, playerMap, rounds, currentRound, roundNum });
-  }, [playerMap, currentRound, roundNum]);
 
   const allMatchesDone = currentRound && currentRound.matches.every(m => m.winner !== null);
 
   const recordResult = (courtIndex, { winner, scoreA, scoreB }) => {
-    setCurrentRound(prev => ({
-      ...prev,
-      matches: prev.matches.map(m => m.courtIndex === courtIndex ? { ...m, winner, scoreA, scoreB } : m)
+    onPatch(s => ({
+      currentRound: {
+        ...s.currentRound,
+        matches: s.currentRound.matches.map(m => m.courtIndex === courtIndex ? { ...m, winner, scoreA, scoreB } : m)
+      }
     }));
   };
 
   const nextRound = () => {
     const updated = applyResults(playerMap, currentRound);
-    setPlayerMap(updated);
-    setRounds(prev => [...prev, currentRound]);
     const next = generateRound(updated, currentRound, courtCount, false, [...rounds, currentRound]);
-    setCurrentRound(next);
-    setRoundNum(n => n + 1);
+    onPatch({
+      playerMap: updated,
+      rounds: [...rounds, currentRound],
+      currentRound: next,
+      roundNum: roundNum + 1,
+    });
   };
 
   const endSession = () => {
     const final = applyResults(playerMap, currentRound);
-    clearSession();
     onEnd(final, rounds.length + 1);
   };
 
-  if (!currentRound) return <div className="text-white p-8 text-center">Loading...</div>;
+  if (!currentRound || !playerMap) return <div className="text-white p-8 text-center">Loading...</div>;
 
-  const benchPlayers = currentRound.bench.map(id => playerMap[id]);
+  const benchPlayers = currentRound.bench.map(id => playerMap[id]).filter(Boolean);
   const inactivePlayers = Object.values(playerMap).filter(p => p.active === false);
 
   return (
@@ -641,7 +802,11 @@ function Session({ courtCount, initialPlayers, savedState, onEnd }) {
       {showManage && (
         <ManagePlayersModal
           playerMap={playerMap}
-          onUpdate={setPlayerMap}
+          onRoster={onRoster}
+          onUpdate={(updater) => {
+            const next = typeof updater === 'function' ? updater(playerMap) : updater;
+            onPatch({ playerMap: next });
+          }}
           onClose={() => setShowManage(false)}
         />
       )}
@@ -652,7 +817,8 @@ function Session({ courtCount, initialPlayers, savedState, onEnd }) {
             <span className="text-3xl">🏸</span>
             <h1 className="text-2xl font-black text-green-400">BadmintonPro</h1>
           </div>
-          <div className="text-slate-400 text-sm mt-1">Round {roundNum} · {courtCount} Court{courtCount > 1 ? 's' : ''} · {Object.keys(playerMap).length} Players</div>
+          <div className="text-slate-400 text-sm mt-1">Men's Doubles · to {scoreTarget} · Round {roundNum} · {courtCount} Court{courtCount > 1 ? 's' : ''} · {Object.keys(playerMap).length} Players</div>
+          <div className="text-slate-500 text-xs mt-1">{userName} · online {online.join(', ') || 'you'} · <button type="button" onClick={onLogout} className="underline">Log out</button></div>
         </div>
         <div className="flex gap-2">
           {allMatchesDone && (
@@ -686,11 +852,12 @@ function Session({ courtCount, initialPlayers, savedState, onEnd }) {
           {/* Courts */}
           {currentRound.matches.map(match => (
             <CourtCard
-              key={match.courtIndex}
+              key={`${roundNum}-${match.courtIndex}`}
               match={match}
               playerMap={playerMap}
               courtNumber={match.courtIndex + 1}
               onResult={(result) => recordResult(match.courtIndex, result)}
+              scoreTarget={scoreTarget}
             />
           ))}
 
@@ -756,6 +923,9 @@ function Session({ courtCount, initialPlayers, savedState, onEnd }) {
             <div className="flex justify-between"><span>🎯 Participation</span><span className="text-blue-400 font-bold">+1 pt</span></div>
             <div className="flex justify-between"><span>⏳ Bench round</span><span className="text-slate-500 font-bold">+0 pts</span></div>
             <div className="border-t border-slate-700 mt-2 pt-2 text-slate-500">
+              Stopped early: leader wins · session points use the recorded score (including margin)
+            </div>
+            <div className="text-slate-500">
               Round 2+: matchups use pts + win% + score diff
             </div>
           </div>
@@ -837,44 +1007,140 @@ function Summary({ playerMap, roundsPlayed, onRestart }) {
 
 // ─── App Root ────────────────────────────────────────────────────────────────
 function App() {
-  const saved = loadSession();
-  const [screen, setScreen] = useState(saved ? saved.screen : 'setup');
-  const [sessionData, setSessionData] = useState(saved ? { courts: saved.courtCount, players: Object.values(saved.playerMap), savedState: saved } : null);
+  const [auth, setAuth] = useState(() => loadAuth());
+  const [snap, setSnap] = useState(null);
+  const [roster, setRoster] = useState([]);
+  const [online, setOnline] = useState([]);
+  const snapRef = useRef(null);
+  const patchQueue = useRef(Promise.resolve());
+  useEffect(() => { snapRef.current = snap; }, [snap]);
 
-  const handleStart = (courts, players) => {
-    clearSession();
-    setSessionData({ courts, players, savedState: null, finalMap: null, rounds: 0 });
-    setScreen('session');
+  const logout = () => {
+    clearAuth();
+    setAuth(null);
+    setSnap(null);
   };
 
-  const handleEnd = (finalMap, rounds) => {
-    setSessionData(prev => ({ ...prev, finalMap, rounds }));
-    setScreen('summary');
+  const applyServer = (data) => {
+    if (data && data.state) {
+      setSnap(data.state);
+      snapRef.current = data.state;
+    }
+    if (data && data.roster) setRoster(data.roster);
+    if (data && data.online) setOnline(data.online);
   };
 
-  const handleRestart = () => {
-    clearSession();
-    _id = 0;
-    setSessionData(null);
-    setScreen('setup');
+  useEffect(() => {
+    if (!auth) return;
+    let cancelled = false;
+    const pull = async () => {
+      const { status, data } = await api('/api/state', { token: auth.token });
+      if (cancelled) return;
+      if (status === 401) { logout(); return; }
+      if (data.state && snapRef.current && data.state.rev < snapRef.current.rev) return;
+      applyServer(data);
+    };
+    pull();
+    const id = setInterval(pull, 2000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [auth && auth.token]);
+
+  const onLoggedIn = (next) => {
+    saveAuth(next);
+    setAuth(next);
   };
 
-  if (screen === 'setup') return <Setup onStart={handleStart} />;
-  if (screen === 'session') return (
-    <Session
-      courtCount={sessionData.courts}
-      initialPlayers={sessionData.players}
-      savedState={sessionData.savedState}
-      onEnd={handleEnd}
+  const onRoster = async (body) => {
+    if (!auth) return null;
+    const { status, data } = await api('/api/roster', { method: 'POST', token: auth.token, body });
+    if (status === 401) { logout(); return null; }
+    if (data.roster) setRoster(data.roster);
+    if (data.online) setOnline(data.online);
+    return data;
+  };
+
+  const onPatch = (partialOrFn) => {
+    if (!auth) return;
+    patchQueue.current = patchQueue.current.then(async () => {
+      const base = snapRef.current;
+      if (!base) return;
+      const partial = typeof partialOrFn === 'function' ? partialOrFn(base) : partialOrFn;
+      const { status, data } = await api('/api/state', {
+        method: 'PUT',
+        token: auth.token,
+        body: { ...base, ...partial, rev: base.rev },
+      });
+      if (status === 401) { logout(); return; }
+      applyServer(data);
+    }).catch(() => {});
+  };
+
+  const handleStart = () => {
+    onPatch(s => {
+      const m = {};
+      (s.players || []).forEach(p => { m[p.id] = p; });
+      return {
+        screen: 'session',
+        playerMap: m,
+        rounds: [],
+        currentRound: generateRound(m, null, s.courts, true, []),
+        roundNum: 1,
+      };
+    });
+  };
+
+  const handleEnd = (finalMap, roundsPlayed) => {
+    onPatch({ screen: 'summary', finalMap, roundsPlayed, playerMap: finalMap });
+  };
+
+  const handleRestart = async () => {
+    if (!auth) return;
+    const { status, data } = await api('/api/reset', { method: 'POST', token: auth.token });
+    if (status === 401) { logout(); return; }
+    applyServer(data);
+  };
+
+  if (!auth) return <Login onLoggedIn={onLoggedIn} />;
+  if (!snap) return <div className="min-h-screen text-white p-8 text-center">Loading club session…</div>;
+
+  if (snap.screen === 'setup') return (
+    <Setup
+      courts={snap.courts}
+      scoreTarget={snap.scoreTarget}
+      players={snap.players || []}
+      roster={roster}
+      onPatch={onPatch}
+      onRoster={onRoster}
+      onStart={handleStart}
+      userName={auth.name}
+      online={online}
+      onLogout={logout}
     />
   );
-  if (screen === 'summary') return (
+  if (snap.screen === 'session') return (
+    <Session
+      courtCount={snap.courts}
+      scoreTarget={snap.scoreTarget}
+      playerMap={snap.playerMap}
+      rounds={snap.rounds || []}
+      currentRound={snap.currentRound}
+      roundNum={snap.roundNum}
+      onPatch={onPatch}
+      onRoster={onRoster}
+      onEnd={handleEnd}
+      userName={auth.name}
+      online={online}
+      onLogout={logout}
+    />
+  );
+  if (snap.screen === 'summary' && snap.finalMap) return (
     <Summary
-      playerMap={sessionData.finalMap}
-      roundsPlayed={sessionData.rounds}
+      playerMap={snap.finalMap}
+      roundsPlayed={snap.roundsPlayed}
       onRestart={handleRestart}
     />
   );
+  return <Setup courts={snap.courts} scoreTarget={snap.scoreTarget} players={snap.players || []} roster={roster} onPatch={onPatch} onRoster={onRoster} onStart={handleStart} userName={auth.name} online={online} onLogout={logout} />;
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(<App />);

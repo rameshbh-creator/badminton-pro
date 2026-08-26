@@ -1,6 +1,7 @@
-const CACHE = 'badminton-v1';
+const CACHE = 'badminton-v3';
 const ASSETS = [
   '/index.html',
+  '/score.js',
   '/manifest.json',
   '/icon-192.png',
   '/icon-512.png',
@@ -25,6 +26,21 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
+  const url = new URL(e.request.url);
+  if (url.pathname.startsWith('/api/')) {
+    e.respondWith(fetch(e.request));
+    return;
+  }
+  if (url.pathname === '/' || url.pathname === '/index.html') {
+    e.respondWith(fetch(e.request).then(res => {
+      if (res.ok) {
+        const clone = res.clone();
+        caches.open(CACHE).then(c => c.put(e.request, clone));
+      }
+      return res;
+    }).catch(() => caches.match(e.request)));
+    return;
+  }
   e.respondWith(
     caches.match(e.request).then(r => r || fetch(e.request).then(res => {
       if (res.ok && e.request.url.startsWith('http')) {

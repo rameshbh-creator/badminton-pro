@@ -1,7 +1,7 @@
 {
   "name": "BadmintonPro",
   "short_name": "Badminton",
-  "description": "Smart matchups for competitive doubles sessions",
+  "description": "Men's doubles matchups with 15 or 21 point games",
   "start_url": "/",
   "display": "standalone",
   "orientation": "portrait",
