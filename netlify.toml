@@ -1,0 +1,19 @@
+[build]
+  publish = "."
+  command = "npm install"
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/club-data.json"
+  to = "/404"
+  status = 404
+  force = true
