@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { createClub, login, getSnapshot, putSnapshot, listOnline } = require('./club.js');
+const { createClub, login, getSnapshot, putSnapshot, listOnline, addToRoster } = require('./club.js');
 
 const club = createClub('1234');
 
@@ -45,5 +45,35 @@ assert.deepStrictEqual(names, ['Ajay', 'Ramesh']);
 const ajayView = getSnapshot(club, ajay.token);
 assert.strictEqual(ajayView.state.scoreTarget, 15);
 assert.strictEqual(ajayView.state.screen, 'session');
+
+// A client cannot replay the session-end transition to double-award roster
+// points, even by forging historySaved:false on the PUT body.
+const pointsClub = createClub('1234');
+const pointsHost = login(pointsClub, 'Host', '1234');
+const pointsPlayer = addToRoster(pointsClub, 'Ajay', 4).player;
+
+const toSession = putSnapshot(pointsClub, pointsHost.token, { rev: 0, screen: 'session' });
+const finalMap = { [pointsPlayer.id]: { id: pointsPlayer.id, sessionPoints: 10, wins: 1, roundsPlayed: 1 } };
+const toSummary = putSnapshot(pointsClub, pointsHost.token, {
+  rev: toSession.state.rev,
+  screen: 'summary',
+  finalMap,
+  roundsPlayed: 1,
+});
+assert.strictEqual(toSummary.ok, true);
+assert.strictEqual(pointsClub.roster[0].totalPoints, 10);
+
+// Attacker: bounce back to 'session' then forge another summary transition
+// with historySaved:false to try to re-trigger the point award.
+const replayToSession = putSnapshot(pointsClub, pointsHost.token, { rev: toSummary.state.rev, screen: 'session' });
+const replaySummary = putSnapshot(pointsClub, pointsHost.token, {
+  rev: replayToSession.state.rev,
+  screen: 'summary',
+  finalMap,
+  roundsPlayed: 1,
+  historySaved: false,
+});
+assert.strictEqual(replaySummary.ok, true);
+assert.strictEqual(pointsClub.roster[0].totalPoints, 10, 'points must not be double-awarded via a forged historySaved');
 
 console.log('club.test.js passed');

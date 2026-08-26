@@ -115,21 +115,6 @@ function recordSessionResults(club, finalMap, roundsPlayed = 0) {
   return { ok: true, roster: club.roster };
 }
 
-function sessionPlayerFromRoster(r) {
-  return {
-    id: r.id,
-    name: r.name,
-    rating: r.rating,
-    active: true,
-    sessionPoints: 0,
-    wins: 0,
-    roundsPlayed: 0,
-    roundsOnBench: 0,
-    pointsScored: 0,
-    pointsAgainst: 0,
-  };
-}
-
 function login(club, name, pin) {
   const trimmed = String(name || '').trim();
   if (!trimmed) return { ok: false, error: 'Enter your name' };
@@ -165,7 +150,11 @@ function putSnapshot(club, token, body) {
   if (!body || body.rev !== club.state.rev) {
     return { ok: false, status: 409, error: 'Session updated elsewhere', state: club.state, roster: club.roster, online: listOnline(club) };
   }
-  const next = { ...club.state, ...body, rev: club.state.rev + 1 };
+  // historySaved is a server-owned flag: a client must never be able to set
+  // it, or a forged PUT could replay the summary transition and double-award
+  // roster points.
+  const { historySaved: _clientHistorySaved, ...clientBody } = body;
+  const next = { ...club.state, ...clientBody, rev: club.state.rev + 1, historySaved: club.state.historySaved };
   if (club.state.screen !== 'summary' && next.screen === 'summary' && next.finalMap && !next.historySaved) {
     recordSessionResults(club, next.finalMap, next.roundsPlayed || 0);
     next.historySaved = true;
@@ -176,7 +165,9 @@ function putSnapshot(club, token, body) {
 
 function resetClub(club, token) {
   if (!requireUser(club, token)) return { ok: false, status: 401, error: 'Login required' };
-  club.state = emptyState();
+  // rev must keep climbing across a reset — clients discard any server
+  // state whose rev is lower than what they last saw.
+  club.state = { ...emptyState(), rev: club.state.rev + 1 };
   return { ok: true, state: club.state, roster: club.roster, online: listOnline(club) };
 }
 
@@ -192,6 +183,5 @@ module.exports = {
   updateRosterPlayer,
   removeFromRoster,
   recordSessionResults,
-  sessionPlayerFromRoster,
   normalizeRosterEntry,
 };

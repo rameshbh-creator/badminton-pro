@@ -54,11 +54,18 @@ function tokenOf(req) {
   return header.startsWith('Bearer ') ? header.slice(7) : '';
 }
 
+function resolveStaticPath(root, urlPath) {
+  const file = path.normalize(path.join(root, urlPath));
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
+  if (file !== root && !file.startsWith(prefix)) return null;
+  return file;
+}
+
 function serveStatic(req, res) {
   let urlPath = decodeURIComponent(req.url.split('?')[0]);
   if (urlPath === '/') urlPath = '/index.html';
-  const file = path.normalize(path.join(ROOT, urlPath));
-  if (!file.startsWith(ROOT)) return send(res, 403, 'Forbidden');
+  const file = resolveStaticPath(ROOT, urlPath);
+  if (!file) return send(res, 403, 'Forbidden');
   fs.readFile(file, (err, data) => {
     if (err) return send(res, 404, 'Not found');
     res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream' });
@@ -123,7 +130,11 @@ function lanUrls() {
   return urls;
 }
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`BadmintonPro club PIN: ${PIN}`);
-  for (const url of lanUrls()) console.log(`  ${url}`);
-});
+if (require.main === module) {
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`BadmintonPro club PIN: ${PIN}`);
+    for (const url of lanUrls()) console.log(`  ${url}`);
+  });
+}
+
+module.exports = { resolveStaticPath };

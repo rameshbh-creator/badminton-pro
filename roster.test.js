@@ -30,6 +30,9 @@ const reset = resetClub(club, user.token);
 assert.strictEqual(reset.ok, true);
 assert.strictEqual(reset.state.players.length, 0);
 assert.strictEqual(reset.roster.length, 2);
+// rev must keep climbing across a reset — a client polling with a cached
+// rev of 2 must not see the post-reset state look "stale" and get ignored.
+assert.ok(reset.state.rev > 2, `expected rev to advance past 2, got ${reset.state.rev}`);
 
 const historyClub = createClub('2026');
 const saved = addToRoster(historyClub, 'Ramesh', 4);
