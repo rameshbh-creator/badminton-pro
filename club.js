@@ -115,18 +115,48 @@ function recordSessionResults(club, finalMap, roundsPlayed = 0) {
   return { ok: true, roster: club.roster };
 }
 
+function signToken(name, secret) {
+  const payload = Buffer.from(JSON.stringify({ n: name, iat: Date.now() })).toString('base64url');
+  const sig = crypto.createHmac('sha256', String(secret)).update(payload).digest('hex');
+  return `${payload}.${sig}`;
+}
+
+function readSignedToken(token, secret) {
+  const raw = String(token || '');
+  const dot = raw.lastIndexOf('.');
+  if (dot <= 0) return null;
+  const payload = raw.slice(0, dot);
+  const sig = raw.slice(dot + 1);
+  const expected = crypto.createHmac('sha256', String(secret)).update(payload).digest('hex');
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (!data || !data.n) return null;
+    return { name: String(data.n) };
+  } catch (_) {
+    return null;
+  }
+}
+
 function login(club, name, pin) {
   const trimmed = String(name || '').trim();
   if (!trimmed) return { ok: false, error: 'Enter your name' };
   if (String(pin) !== club.pin) return { ok: false, error: 'Wrong club PIN' };
-  const token = crypto.randomBytes(16).toString('hex');
+  const token = signToken(trimmed, club.pin);
   club.tokens.set(token, { name: trimmed, lastSeen: Date.now() });
-  return { ok: true, token, name: trimmed };
+  return { ok: true, token, name: trimmed, state: club.state, roster: club.roster, online: listOnline(club) };
 }
 
 function requireUser(club, token) {
-  const user = club.tokens.get(token);
-  if (!user) return null;
+  let user = club.tokens.get(token);
+  if (!user) {
+    const verified = readSignedToken(token, club.pin);
+    if (!verified) return null;
+    user = { name: verified.name, lastSeen: Date.now() };
+    club.tokens.set(token, user);
+  }
   user.lastSeen = Date.now();
   return user;
 }

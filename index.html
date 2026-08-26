@@ -605,12 +605,13 @@ function clearAuth() {
 }
 
 async function api(path, { method = 'GET', token, body } = {}) {
+  const headers = {
+    ...(token ? { Authorization: `Bearer ${token}`, 'X-Club-Token': token } : {}),
+  };
+  if (body) headers['Content-Type'] = 'application/json';
   const res = await fetch(path, {
     method,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}`, 'X-Club-Token': token } : {}),
-    },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({ ok: false, error: 'Server error' }));
@@ -645,7 +646,7 @@ function Login({ onLoggedIn }) {
     try {
       const { data } = await api('/api/login', { method: 'POST', body: { name, pin } });
       if (!data.ok) { setError(data.error || 'Login failed'); setBusy(false); return; }
-      onLoggedIn({ token: data.token, name: data.name });
+      onLoggedIn({ token: data.token, name: data.name, state: data.state, roster: data.roster, online: data.online });
     } catch (err) {
       setError('Cannot reach the club server. Use node server.js and open the printed URL.');
       setBusy(false);
@@ -1046,8 +1047,9 @@ function App() {
   }, [auth && auth.token]);
 
   const onLoggedIn = (next) => {
-    saveAuth(next);
-    setAuth(next);
+    saveAuth({ token: next.token, name: next.name });
+    setAuth({ token: next.token, name: next.name });
+    applyServer(next);
   };
 
   const onRoster = async (body) => {

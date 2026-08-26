@@ -1,4 +1,4 @@
-const CACHE = 'badminton-v3';
+const CACHE = 'badminton-v4';
 const ASSETS = [
   '/index.html',
   '/score.js',

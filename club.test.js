@@ -46,6 +46,15 @@ const ajayView = getSnapshot(club, ajay.token);
 assert.strictEqual(ajayView.state.scoreTarget, 15);
 assert.strictEqual(ajayView.state.screen, 'session');
 
+// Netlify functions load club state from blobs per request. The instance that
+// handles GET /api/state may not yet see the token Map written by login.
+// Auth must still succeed from the token itself.
+const otherInstance = createClub('1234');
+const crossInstance = getSnapshot(otherInstance, ramesh.token);
+assert.strictEqual(crossInstance.ok, true, 'login token must work on a club instance that never stored it');
+assert.strictEqual(crossInstance.state.screen, 'setup');
+
+
 // A client cannot replay the session-end transition to double-award roster
 // points, even by forging historySaved:false on the PUT body.
 const pointsClub = createClub('1234');
